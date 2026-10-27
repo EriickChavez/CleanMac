@@ -8,10 +8,15 @@
 import SwiftUI
 
 @main
-struct CleanMacApp: App {
+struct ClearApp: App {
+    init() {
+        MenuBarService.shared.setup()
+    }
+    
     var body: some Scene {
         WindowGroup {
             ContentView()
         }
+        .windowStyle(.hiddenTitleBar)
     }
 }
