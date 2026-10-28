@@ -5,56 +5,44 @@
 //  Created by Erick Chavez on 27/10/26.
 //
 
+import Foundation
 import SwiftUI
+import Combine
 import AppKit
 
-final class MenuBarService: NSObject {
+// MARK: - MenuBarService
+/// Servicio para el icono en la menu bar (futuro)
+@MainActor
+final class MenuBarService: ObservableObject {
+    
     static let shared = MenuBarService()
+    
+    // MARK: - Published
+    
+    @Published var totalGB: Double = 0
+    
+    // MARK: - Private
+    
     private var statusItem: NSStatusItem?
-    var totalSizeGB: Double = 0
+    
+    // MARK: - Init
+    
+    private init() {
+        print("[MenuBarService] Inicializado")
+    }
+    
+    // MARK: - Setup
     
     func setup() {
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        if let button = statusItem?.button {
-            button.image = NSImage(systemSymbolName: "trash.circle.fill", accessibilityDescription: "Clear")
-            button.image?.isTemplate = true
-        }
-        updateMenu()
+        print("[MenuBarService] Setup completado")
+        // Por ahora no crea statusItem, solo prepara
+        // En el futuro aquí irá el icono de la menu bar
     }
     
-    func updateTotalSize(files: [FileItem], caches: [AppCacheInfo]) {
-        let filesGB = files.reduce(0) { $0 + $1.sizeMB } / 1024
-        let cachesGB = caches.reduce(0) { $0 + $1.totalSizeMB } / 1024
-        totalSizeGB = filesGB + cachesGB
-        DispatchQueue.main.async { self.updateMenu() }
-    }
+    // MARK: - Update
     
-    private func updateMenu() {
-        let menu = NSMenu()
-        
-        let sizeItem = NSMenuItem(title: String(format: "🧹 %.2f GB por limpiar", totalSizeGB), action: nil, keyEquivalent: "")
-        sizeItem.isEnabled = false
-        menu.addItem(sizeItem)
-        menu.addItem(NSMenuItem.separator())
-        
-        menu.addItem(NSMenuItem(title: "Abrir Clear", action: #selector(openApp), keyEquivalent: "o"))
-        menu.addItem(NSMenuItem(title: "Limpiar rápido", action: #selector(quickClean), keyEquivalent: ""))
-        menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "Salir", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
-        
-        statusItem?.menu = menu
-    }
-    
-    @objc private func openApp() {
-        NSApp.activate(ignoringOtherApps: true)
-        NSApp.windows.first?.makeKeyAndOrderFront(nil)
-    }
-    
-    @objc private func quickClean() {
-        Task {
-            if let files = try? ScannerService.shared.scanDownloads() {
-                try? SmartTrashService.shared.deleteNow(files: files)
-            }
-        }
+    func update(totalGB: Double) {
+        self.totalGB = totalGB
+        print("[MenuBarService] Total actualizado: \(totalGB)GB")
     }
 }

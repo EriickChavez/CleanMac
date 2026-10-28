@@ -6,14 +6,10 @@
 //
 
 import Foundation
-
-final class SmartTrashService: Sendable {
+final class SmartTrashService {
     static let shared = SmartTrashService()
-    func cleanupExpired() {}
-    func moveToSmartTrash(files: [FileItem], days: Int) throws {
-        for f in files { try? FileManager.default.removeItem(atPath: f.path) }
-    }
-    func deleteNow(files: [FileItem]) throws {
-        for f in files { try? FileManager.default.removeItem(atPath: f.path) }
+    private init() {}
+    func moveToSmartTrash(path: String) throws {
+        try FileManager.default.trashItem(at: URL(fileURLWithPath: path), resultingItemURL: nil)
     }
 }

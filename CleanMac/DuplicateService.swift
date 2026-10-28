@@ -8,80 +8,125 @@
 import Foundation
 import CryptoKit
 
-struct DuplicateGroup: Identifiable, Sendable, Equatable {
-    let id = UUID()
-    let hash: String
-    let files: [FileItem]
-    var totalWastedMB: Double { Double(files.count - 1) * (files.first?.sizeMB ?? 0) }
-    var sizeText: String { totalWastedMB > 1024 ? String(format: "%.2f GB", totalWastedMB/1024) : String(format: "%.0f MB", totalWastedMB) }
-    static func == (lhs: DuplicateGroup, rhs: DuplicateGroup) -> Bool { lhs.id == rhs.id }
-}
-
-final class DuplicateService: Sendable {
+/// Encuentra duplicados agrupando por tamaño primero, luego hash
+/// Así no hace hash de todo
+final class DuplicateService {
+    
     static let shared = DuplicateService()
     
-    func findDuplicates(in files: [FileItem]) -> [DuplicateGroup] {
-        // Paso 1: Agrupa por tamaño exacto (muy rápido)
-        var bySize: [Double: [FileItem]] = [:]
-        for f in files { bySize[f.sizeMB, default: []].append(f) }
+    private let fileManager = FileManager.default
+    
+    private init() {}
+    
+    // MARK: - Scan por Path
+    
+    func findDuplicates(in path: String) -> [DuplicateGroup] {
         
-        var groups: [DuplicateGroup] = []
+        let url = URL(fileURLWithPath: path)
         
-        for (_, sameSizeFiles) in bySize where sameSizeFiles.count > 1 {
-            // Paso 2: Para cada grupo del mismo tamaño, hashea contenido real
-            var byHash: [String: [FileItem]] = [:]
-            
-            for file in sameSizeFiles {
-                if let hash = hashFileIntelligent(path: file.path, sizeMB: file.sizeMB) {
-                    byHash[hash, default: []].append(file)
-                }
-            }
-            
-            // Paso 3: Solo los que tienen mismo hash son duplicados reales
-            for (hash, dupFiles) in byHash where dupFiles.count > 1 {
-                groups.append(DuplicateGroup(hash: hash, files: dupFiles))
-            }
+        // Seguridad: verificar que existe
+        guard fileManager.fileExists(atPath: url.path) else {
+            print("[DuplicateService] Path no existe: \(path)")
+            return []
         }
         
-        return groups.sorted { $0.totalWastedMB > $1.totalWastedMB }
+        guard let fileURLs = try? fileManager.contentsOfDirectory(
+            at: url,
+            includingPropertiesForKeys: [.fileSizeKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+        
+        var items: [FileItem] = []
+        
+        for fileURL in fileURLs {
+            guard let fileSize = try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize else {
+                continue
+            }
+            
+            let fileItem = FileItem(
+                name: fileURL.lastPathComponent,
+                path: fileURL.path,
+                sizeMB: Double(fileSize) / (1024.0 * 1024.0),
+                lastAccess: Date()
+            )
+            
+            items.append(fileItem)
+        }
+        
+        return findDuplicates(in: items)
     }
     
-    // Hash inteligente: rápido pero 100% preciso
-    private func hashFileIntelligent(path: String, sizeMB: Double) -> String? {
-        let url = URL(fileURLWithPath: path)
-        guard let fileHandle = try? FileHandle(forReadingFrom: url) else { return nil }
-        defer { try? fileHandle.close() }
+    // MARK: - Find Duplicates Lógica Correcta
+    
+    func findDuplicates(in files: [FileItem]) -> [DuplicateGroup] {
         
-        var hasher = SHA256()
+        // Paso 1: Agrupar por tamaño redondeado
+        // Si no tienen mismo tamaño, no pueden ser duplicados
+        var filesBySize: [Double: [FileItem]] = [:]
         
-        if sizeMB < 100 {
-            // Archivos <100MB: hashea TODO el archivo (100% preciso)
-            // Leemos por chunks de 1MB para no matar RAM
-            while let chunk = try? fileHandle.read(upToCount: 1024 * 1024), !chunk.isEmpty {
-                hasher.update(data: chunk)
-            }
-        } else {
-            // Archivos >100MB: hashea primer 1MB + último 1MB + tamaño
-            // Esto es 99.9% preciso y 20x más rápido que hashear 5GB
-            if let firstMB = try? fileHandle.read(upToCount: 1024 * 1024) {
-                hasher.update(data: firstMB)
+        for file in files {
+            let roundedSize = round(file.sizeMB * 10.0) / 10.0
+            filesBySize[roundedSize, default: []].append(file)
+        }
+        
+        var duplicateGroups: [DuplicateGroup] = []
+        
+        // Paso 2: Solo para grupos con mismo tamaño, hacer hash
+        for (_, sameSizeFiles) in filesBySize {
+            
+            // Si solo hay 1 archivo con ese tamaño, no es duplicado
+            guard sameSizeFiles.count > 1 else {
+                continue
             }
             
-            // Último 1MB
-            if let fileSize = try? fileHandle.seekToEnd(), fileSize > 1024 * 1024 {
-                try? fileHandle.seek(toOffset: fileSize - 1024 * 1024)
-                if let lastMB = try? fileHandle.readToEnd() {
-                    hasher.update(data: lastMB)
+            // Agrupar por hash (solo primer 1MB para ser rápido)
+            var filesByHash: [String: [FileItem]] = [:]
+            
+            for file in sameSizeFiles {
+                if let hash = hashFirstMegabyte(path: file.path) {
+                    filesByHash[hash, default: []].append(file)
                 }
             }
             
-            // Agrega el tamaño al hash para evitar colisiones
-            if let sizeData = "\(sizeMB)".data(using: .utf8) {
-                hasher.update(data: sizeData)
+            // Crear grupos
+            for (_, duplicateFiles) in filesByHash {
+                if duplicateFiles.count > 1 {
+                    let group = DuplicateGroup(files: duplicateFiles)
+                    duplicateGroups.append(group)
+                }
             }
         }
         
-        let digest = hasher.finalize()
-        return digest.map { String(format: "%02x", $0) }.joined()
+        print("[DuplicateService] Encontrados \(duplicateGroups.count) grupos de duplicados")
+        
+        return duplicateGroups
+    }
+    
+    // MARK: - Hash Seguro y Rápido
+    
+    /// Solo hashea el primer MB para no leer archivos de 4GB completos
+    private func hashFirstMegabyte(path: String) -> String? {
+        
+        guard let fileHandle = try? FileHandle(forReadingAtPath: path) else {
+            return nil
+        }
+        
+        defer {
+            try? fileHandle.close()
+        }
+        
+        let firstMBData = fileHandle.readData(ofLength: 1024 * 1024)
+        
+        guard !firstMBData.isEmpty else {
+            return nil
+        }
+        
+        let digest = SHA256.hash(data: firstMBData)
+        
+        let hashString = digest.map { String(format: "%02x", $0) }.joined()
+        
+        return hashString
     }
 }

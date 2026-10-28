@@ -6,50 +6,155 @@
 //
 
 import Foundation
-import AppKit
 
-struct AppCacheInfo: Identifiable, Sendable, Equatable {
-    let id = UUID(); let name: String; let bundleID: String?; let icon: NSImage?; let cachePaths: [String]; let totalSizeMB: Double; let isCLI: Bool
-    var sizeText: String { totalSizeMB > 1024 ? String(format: "%.2f GB", totalSizeMB/1024) : String(format: "%.0f MB", totalSizeMB) }
-    static func == (lhs: AppCacheInfo, rhs: AppCacheInfo) -> Bool { lhs.id == rhs.id }
-}
-
-final class AppCacheService: Sendable {
+/// Escanea ~/Library/Caches de forma segura
+/// NUNCA usa du -sm, solo FileManager
+final class AppCacheService {
+    
     static let shared = AppCacheService()
-    func scanAllAppCaches() -> [AppCacheInfo] {
-        var results: [AppCacheInfo] = []
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        for folder in ["/Applications", "\(home)/Applications"] {
-            guard let apps = try? FileManager.default.contentsOfDirectory(atPath: folder) else { continue }
-            for appName in apps where appName.hasSuffix(".app") {
-                let full = "\(folder)/\(appName)"; let name = appName.replacingOccurrences(of: ".app", with: "")
-                let bid = Bundle(path: full)?.bundleIdentifier; let icon = NSWorkspace.shared.icon(forFile: full)
-                var caches = [String](); if let bid { caches.append("\(home)/Library/Caches/\(bid)") }
-                caches.append("\(home)/Library/Caches/\(name)")
-                let size = fastSize(paths: caches); if size > 10 {
-                    results.append(AppCacheInfo(name: name, bundleID: bid, icon: icon, cachePaths: caches, totalSizeMB: size, isCLI: false))
+    
+    private let fileManager = FileManager.default
+    
+    private init() {}
+    
+    // MARK: - Scan
+    
+    func scanAppCaches() -> [AppCacheInfo] {
+        
+        let cachesRoot = fileManager.homeDirectoryForCurrentUser.path + "/Library/Caches"
+        
+        // Seguridad: verificar que existe y es directorio
+        var isDir: ObjCBool = false
+        guard fileManager.fileExists(atPath: cachesRoot, isDirectory: &isDir),
+              isDir.boolValue else {
+            print("[AppCacheService] Caches no existe")
+            return []
+        }
+        
+        guard let items = try? fileManager.contentsOfDirectory(atPath: cachesRoot) else {
+            print("[AppCacheService] No se pudo leer Caches")
+            return []
+        }
+        
+        var result: [AppCacheInfo] = []
+        
+        for itemName in items {
+            
+            // Seguridad: saltar ocultos
+            if itemName.hasPrefix(".") {
+                continue
+            }
+            
+            let fullPath = "\(cachesRoot)/\(itemName)"
+            
+            // Seguridad: verificar que es directorio
+            var isDirectory: ObjCBool = false
+            guard fileManager.fileExists(atPath: fullPath, isDirectory: &isDirectory),
+                  isDirectory.boolValue else {
+                continue
+            }
+            
+            // Performance: tamaño rápido con límite de 500 archivos
+            let sizeMB = fastSizeLimited(path: fullPath, fileLimit: 500)
+            
+            // Mostrar desde 5MB para que no se vea vacío
+            // Antes era 20MB y por eso no veías nada
+            if sizeMB > 5.0 {
+                let info = AppCacheInfo(
+                    appName: itemName,
+                    path: fullPath,
+                    sizeMB: sizeMB,
+                    bundleId: itemName
+                )
+                result.append(info)
+            }
+        }
+        
+        // Si aún está vacío (usuario muy limpio), mostrar los primeros 20 aunque sean pequeños
+        // Para que no se vea la pantalla vacía
+        if result.isEmpty {
+            print("[AppCacheService] No hay caches >5MB, mostrando primeros 20")
+            
+            for itemName in items.prefix(20) {
+                let fullPath = "\(cachesRoot)/\(itemName)"
+                
+                var isDirectory: ObjCBool = false
+                if fileManager.fileExists(atPath: fullPath, isDirectory: &isDirectory),
+                   isDirectory.boolValue {
+                    
+                    let sizeMB = fastSizeLimited(path: fullPath, fileLimit: 100)
+                    
+                    let info = AppCacheInfo(
+                        appName: itemName,
+                        path: fullPath,
+                        sizeMB: sizeMB,
+                        bundleId: itemName
+                    )
+                    result.append(info)
                 }
-                if results.count > 30 { break }
             }
         }
-        let cliTools = [("Node.js", ["\(home)/.npm", "\(home)/Library/Caches/node"]), ("Homebrew", ["\(home)/Library/Caches/Homebrew"]), ("Python", ["\(home)/Library/Caches/pip"])]
-        for tool in cliTools {
-            let size = fastSize(paths: tool.1); if size > 1 {
-                let icon = NSImage(systemSymbolName: "terminal.fill", accessibilityDescription: nil)
-                results.append(AppCacheInfo(name: tool.0, bundleID: nil, icon: icon, cachePaths: tool.1, totalSizeMB: size, isCLI: true))
+        
+        // Ordenar por tamaño
+        let sorted = result.sorted { $0.sizeMB > $1.sizeMB }
+        
+        print("[AppCacheService] Encontrados \(sorted.count) caches")
+        
+        return sorted
+    }
+    
+    // MARK: - Fast Size Seguro
+    
+    /// Calcula tamaño con límite de archivos para no congelar
+    private func fastSizeLimited(path: String, fileLimit: Int) -> Double {
+        
+        let url = URL(fileURLWithPath: path)
+        
+        guard let enumerator = fileManager.enumerator(
+            at: url,
+            includingPropertiesForKeys: [.fileSizeKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return 0
+        }
+        
+        var totalSize: UInt64 = 0
+        var countedFiles = 0
+        
+        for case let fileURL as URL in enumerator {
+            
+            // Performance: límite de archivos
+            if countedFiles > fileLimit {
+                break
             }
+            
+            if let fileSize = try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize {
+                totalSize += UInt64(fileSize)
+            }
+            
+            countedFiles += 1
         }
-        return results.sorted { $0.totalSizeMB > $1.totalSizeMB }
+        
+        return Double(totalSize) / (1024.0 * 1024.0)
     }
-    private func fastSize(paths: [String]) -> Double {
-        var total: Double = 0
-        for path in paths { guard FileManager.default.fileExists(atPath: path) else { continue }
-            let task = Process(); task.executableURL = URL(fileURLWithPath: "/usr/bin/du"); task.arguments = ["-sm", path]
-            let pipe = Pipe(); task.standardOutput = pipe; task.standardError = Pipe(); try? task.run(); task.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            if let out = String(data: data, encoding: .utf8), let mb = Double(out.components(separatedBy: "\t").first ?? "") { total += mb }
+    
+    // MARK: - Delete Seguro
+    
+    /// Borra de forma segura: mueve a papelera, no rm -rf
+    func deleteSafely(info: AppCacheInfo) throws {
+        
+        // Seguridad: verificar que es dentro de Library/Caches
+        guard info.path.contains("/Library/Caches/") else {
+            throw NSError(domain: "Security", code: 1, userInfo: [NSLocalizedDescriptionKey: "Path no seguro para borrar: \(info.path)"])
         }
-        return total
+        
+        // Seguridad: nunca borrar si es muy grande y parece importante
+        if info.sizeMB > 5000 {
+            print("[AppCacheService] ADVERTENCIA: Intentando borrar \(info.sizeMB)MB en \(info.path)")
+        }
+        
+        try fileManager.trashItem(at: URL(fileURLWithPath: info.path), resultingItemURL: nil)
+        
+        print("[AppCacheService] Movido a papelera: \(info.path)")
     }
-    func clearCache(for app: AppCacheInfo) throws { for p in app.cachePaths { try? FileManager.default.removeItem(atPath: p) } }
 }

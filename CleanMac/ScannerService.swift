@@ -7,46 +7,50 @@
 
 import Foundation
 
-final class ScannerService: Sendable {
+final class ScannerService {
     static let shared = ScannerService()
-    static var realHomeDirectory: URL { FileManager.default.homeDirectoryForCurrentUser }
+    static var realHomeDirectory: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+    }
+    private let fm = FileManager.default
+    private init() {}
     
     func scanDownloads() throws -> [FileItem] {
-        let downloads = Self.realHomeDirectory.appendingPathComponent("Downloads")
-        let fm = FileManager.default
-        guard let files = try? fm.contentsOfDirectory(at: downloads, includingPropertiesForKeys: [.fileSizeKey, .contentAccessDateKey], options: .skipsHiddenFiles) else { return [] }
+        let url = Self.realHomeDirectory.appendingPathComponent("Downloads")
         
-        return files.compactMap { url in
-            guard let attrs = try? fm.attributesOfItem(atPath: url.path) else { return nil }
-            let size = (attrs[.size] as? UInt64 ?? 0)
-            let date = attrs[.creationDate] as? Date ?? .distantPast
-            return FileItem(name: url.lastPathComponent, path: url.path, sizeMB: Double(size)/1024/1024, lastAccess: date)
-        }.sorted { $0.sizeMB > $1.sizeMB }
-    }
-    
-    func scanHiddenCaches() -> [FileItem] {
-        let home = Self.realHomeDirectory.path
-        let paths = ["\(home)/Library/Caches", "\(home)/Library/Application Support"]
-        var result: [FileItem] = []
-        for base in paths {
-            guard let files = try? FileManager.default.contentsOfDirectory(atPath: base) else { continue }
-            for name in files {
-                let full = "\(base)/\(name)"
-                if let size = fastSizeMB(path: full), size > 100 {
-                    result.append(FileItem(name: name, path: full, sizeMB: size, lastAccess: .distantPast, isHidden: true))
-                }
-            }
+        guard fm.fileExists(atPath: url.path) else {
+            print("[ScannerService] Downloads no existe")
+            return []
         }
+        
+        guard let fileURLs = try? fm.contentsOfDirectory(
+            at: url,
+            includingPropertiesForKeys: [.fileSizeKey, .contentAccessDateKey, .isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            print("[ScannerService] No se pudo leer Downloads")
+            return []
+        }
+        
+        var result: [FileItem] = []
+        
+        for fileURL in fileURLs {
+            guard let values = try? fileURL.resourceValues(forKeys: [.fileSizeKey, .contentAccessDateKey, .isDirectoryKey]) else { continue }
+            guard values.isDirectory == false else { continue }
+            guard let fileSize = values.fileSize else { continue }
+            
+            let sizeMB = Double(fileSize) / (1024 * 1024)
+            if sizeMB < 1 { continue }
+            
+            let item = FileItem(
+                name: fileURL.lastPathComponent,
+                path: fileURL.path,
+                sizeMB: sizeMB,
+                lastAccess: values.contentAccessDate ?? Date()
+            )
+            result.append(item)
+        }
+        
         return result.sorted { $0.sizeMB > $1.sizeMB }
-    }
-    
-    private func fastSizeMB(path: String) -> Double? {
-        guard FileManager.default.fileExists(atPath: path) else { return nil }
-        let task = Process(); task.executableURL = URL(fileURLWithPath: "/usr/bin/du"); task.arguments = ["-sm", path]
-        let pipe = Pipe(); task.standardOutput = pipe; task.standardError = Pipe()
-        try? task.run(); task.waitUntilExit()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        if let out = String(data: data, encoding: .utf8), let mb = Double(out.components(separatedBy: "\t").first ?? "") { return mb }
-        return nil
     }
 }
